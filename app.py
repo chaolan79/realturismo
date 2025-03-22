@@ -13,8 +13,11 @@ import apps.configuracoes as configuracoes
 import pandas as pd
 import plotly.express as px
 from sqlalchemy.sql import func
-from database import Session, Veiculo, Manutencao, Acessorio, Configuracao
+from database import Session, Veiculo, Manutencao, Acessorio, Configuracao, Abastecimento
 from datetime import datetime, timedelta, date
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Inicializar a sessão com try-except
 try:
@@ -32,6 +35,7 @@ st.sidebar.markdown("---")
 menu_options = ["Dashboard", "Cadastros", "Manutenções", "Relatórios", "Configurações"]
 menu_principal = st.sidebar.radio("📌 **Selecione**:", menu_options, format_func=lambda x: f"🔹 {x}", label_visibility="collapsed")
 
+# Estilo do menu lateral
 st.sidebar.markdown("""
 <style>
 .stRadio > label > div {
@@ -70,6 +74,33 @@ st.sidebar.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Estilo para o botão de sincronização no dashboard
+st.markdown("""
+<style>
+.sync-button-container {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 20px;
+    margin-top: 10px;
+    padding-right: 20px;
+}
+.sync-button {
+    background-color: #4CAF50 !important;
+    color: white !important;
+    padding: 10px 20px !important;
+    border: none !important;
+    border-radius: 5px !important;
+    font-size: 16px !important;
+    cursor: pointer !important;
+    transition: background-color 0.3s ease !important;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2) !important;
+}
+.sync-button:hover {
+    background-color: #45a049 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 def formatar_valor_ptbr(valor):
     return f"{float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -78,7 +109,14 @@ def formatar_valor_monetario(valor):
     return f"R$ {valor_formatado}"
 
 def adicionar_emoji_status(status):
-    emoji_map = {"pendente": "⏳", "saudavel": "✅", "alerta": "⚠️", "vencido": "⏰", "concluído": "✔️", "cancelado": "❌"}
+    emoji_map = {
+        "concluído": "✅",
+        "saudavel": "🟢",
+        "alerta": "⚠️",
+        "vencido": "⛔",
+        "pendente": "⏳",
+        "cancelado": "❌"
+    }
     return f"{emoji_map.get(status.lower(), '')} {status}"
 
 def adicionar_emoji_tipo(tipo):
@@ -93,11 +131,115 @@ def obter_configuracao(chave, valor_padrao, session_instance):
         st.error(f"❌ Erro ao obter configuração '{chave}': {e}")
         return valor_padrao
 
+def calcular_status(registro, veiculo, km_aviso=1000.0, data_limite_dias=30.0):
+    if not registro.tem_vencimento:
+        return "concluído", ""
+    
+    hodometro_atual = veiculo.hodometro_atual if veiculo and veiculo.hodometro_atual is not None else registro.hodometro_manutencao if hasattr(registro, 'hodometro_manutencao') else registro.km_instalacao
+    hoje = datetime.now().date()
+    
+    vencido = False
+    alerta = False
+    motivo = ""
+    
+    if registro.data_vencimento:
+        dias_restantes = (registro.data_vencimento - hoje).days
+        if dias_restantes < 0:
+            vencido = True
+            motivo = f"Vencido por data ({registro.data_vencimento})"
+        elif dias_restantes <= data_limite_dias:
+            alerta = True
+            motivo = f"Alerta por data ({dias_restantes} dias restantes)"
+    
+    if registro.km_vencimento and hodometro_atual is not None:
+        if hodometro_atual > registro.km_vencimento:
+            vencido = True
+            motivo = f"Vencido por KM ({hodometro_atual} > {registro.km_vencimento})"
+        elif (registro.km_vencimento - hodometro_atual) <= km_aviso:
+            alerta = True
+            motivo = f"Alerta por KM ({registro.km_vencimento - hodometro_atual} KM restantes)"
+    
+    status = "vencido" if vencido else "alerta" if alerta else "saudavel"
+    return status, motivo
+
+def sincronizar_dados_veiculos(session_instance, write_progress=True):
+    try:
+        api_url = "http://89.116.214.34:8000/api/abastecimentos/"
+        headers = {"Authorization": "Token c6f5a268b3f1bc95c875a8203ad1562f47dcf0ad"}
+        params = {"EValidado": "", "veiculo": "", "month": "", "year": "2025", "page": 1, "perPage": 100}
+
+        session_requests = requests.Session()
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+        session_requests.mount("http://", HTTPAdapter(max_retries=retries))
+        TIMEOUT = 30
+
+        try:
+            test_response = session_requests.get(api_url, headers=headers, params=params, timeout=TIMEOUT)
+            test_response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise
+
+        hodometros_veiculos = {}
+        while True:
+            try:
+                response = session_requests.get(api_url, headers=headers, params=params, timeout=TIMEOUT)
+                response.raise_for_status()
+            except requests.exceptions.RequestException as e:
+                raise
+
+            dados_api = response.json()
+            resultados = dados_api.get("results", [])
+
+            for item in resultados:
+                codigo = str(item.get("veiculo"))
+                hodometro = float(item.get("hodometro", 0.0))
+                data_str = item.get("data")
+
+                try:
+                    data = datetime.fromisoformat(data_str.replace("Z", "+00:00"))
+                    data = data.replace(tzinfo=None)
+                except ValueError:
+                    continue
+
+                if codigo in hodometros_veiculos:
+                    if data > hodometros_veiculos[codigo]["data"]:
+                        hodometros_veiculos[codigo] = {"hodometro": hodometro, "data": data}
+                else:
+                    hodometros_veiculos[codigo] = {"hodometro": hodometro, "data": data}
+
+            next_url = dados_api.get("next")
+            if not next_url:
+                break
+            params["page"] += 1
+
+        veiculos = session_instance.query(Veiculo).all()
+        veiculos_dict = {str(v.codigo): v for v in veiculos}
+
+        for codigo, dados in hodometros_veiculos.items():
+            hodometro = dados["hodometro"]
+            if hodometro <= 0.0:
+                continue
+            if codigo in veiculos_dict:
+                veiculo = veiculos_dict[codigo]
+                ultimo_abastecimento = session_instance.query(Abastecimento).filter_by(veiculo_id=veiculo.id).order_by(Abastecimento.data.desc()).first()
+                data_ultimo_abastecimento = ultimo_abastecimento.data if ultimo_abastecimento else datetime.min
+                if hasattr(data_ultimo_abastecimento, 'tzinfo') and data_ultimo_abastecimento.tzinfo is not None:
+                    data_ultimo_abastecimento = data_ultimo_abastecimento.replace(tzinfo=None)
+                if dados["data"] > data_ultimo_abastecimento:
+                    veiculo.hodometro_atual = hodometro
+
+        session_instance.commit()
+
+    except requests.exceptions.RequestException as e:
+        raise
+    except Exception as e:
+        session_instance.rollback()
+        raise
+
 def obter_dados_manutencoes(filtro_status=None, session_instance=None):
     if not session_instance:
         return pd.DataFrame()
     try:
-        # Obter configurações de KM Aviso e Data Limite
         km_aviso = float(obter_configuracao("km_aviso", 1000.0, session_instance))
         data_limite_dias = float(obter_configuracao("data_limite_dias", 30.0, session_instance))
 
@@ -105,51 +247,47 @@ def obter_dados_manutencoes(filtro_status=None, session_instance=None):
         if not manutencoes:
             return pd.DataFrame()
         dados_manutencoes = []
-        hoje = datetime.now().date()
         for m in manutencoes:
             veiculo = session_instance.query(Veiculo).filter_by(id=m.veiculo_id).first()
             veiculo_nome = f"{veiculo.codigo} - {veiculo.placa} ({veiculo.modelo})" if veiculo else "Desconhecido"
-            hodometro_atual = veiculo.hodometro_atual if veiculo and veiculo.hodometro_atual is not None else m.hodometro_manutencao
+            hodometro_atual = veiculo.hodometro_atual if veiculo else 0.0
+
+            if not veiculo:
+                continue
+            if hodometro_atual == 0.0:
+                continue
+
             categoria = getattr(m, 'categoria', 'N/A') if m.categoria else 'N/A'
             responsavel = getattr(m, 'responsavel', 'N/A') if m.responsavel else 'N/A'
             oficina = getattr(m, 'oficina', 'N/A') if m.oficina else 'N/A'
 
-            vencida = False
-            alerta = False
-            concluida = m.data_realizacao is not None
-            motivo = ""
-            if getattr(m, 'tem_vencimento', False) and not concluida:
-                if m.data_vencimento:
-                    dias_restantes = (m.data_vencimento - hoje).days
-                    if dias_restantes < 0:
-                        vencida = True
-                        motivo = f"Vencida por data ({m.data_vencimento})"
-                    elif dias_restantes <= data_limite_dias:
-                        alerta = True
-                        motivo = f"Alerta por data ({dias_restantes} dias restantes)"
-                if m.km_vencimento and hodometro_atual is not None and hodometro_atual > m.km_vencimento:
-                    vencida = True
-                    motivo = f"Vencida por KM ({hodometro_atual} > {m.km_vencimento})"
-                elif m.km_vencimento and hodometro_atual is not None and (m.km_vencimento - hodometro_atual) <= km_aviso:
-                    alerta = True
-                    motivo = f"Alerta por KM ({m.km_vencimento - hodometro_atual} KM restantes)"
-            status = "Concluído" if concluida else "Vencida" if vencida else "Alerta" if alerta else "Saudável"
+            status, motivo = calcular_status(m, veiculo, km_aviso, data_limite_dias)
             dados_manutencoes.append({
-                "ID": m.id, "Tipo de Registro": "Manutenção", "Veículo": veiculo_nome, "Categoria": categoria,
-                "Responsável": responsavel, "Oficina": oficina, "Tipo": adicionar_emoji_tipo(m.tipo) if m.tipo else "N/A",
-                "KM Aviso": m.km_aviso, "KM Aviso (km)": f"{formatar_valor_ptbr(m.km_aviso)} km" if m.km_aviso else "N/A",
-                "Data Manutenção": m.data_manutencao, "Hodômetro": m.hodometro_manutencao,
-                "Hodômetro (km)": f"{formatar_valor_ptbr(m.hodometro_manutencao)} km" if m.hodometro_manutencao else "N/A",
+                "ID": m.id,
+                "Tipo de Registro": "Manutenção",
+                "Veículo": veiculo_nome,
+                "Categoria": categoria,
+                "Responsável": responsavel,
+                "Oficina": oficina,
+                "Tipo": adicionar_emoji_tipo(m.tipo) if m.tipo else "N/A",
+                "KM Aviso": m.km_aviso,
+                "KM Aviso (km)": f"{formatar_valor_ptbr(m.km_aviso)} km" if m.km_aviso else "N/A",
+                "Data Manutenção": m.data_manutencao,
+                "Hodômetro Atual (km)": f"{formatar_valor_ptbr(hodometro_atual)} km",
                 "Valor (R$)": m.valor_manutencao if m.valor_manutencao else 0.0,
                 "Valor Formatado (R$)": formatar_valor_monetario(m.valor_manutencao) if m.valor_manutencao else "N/A",
-                "KM Vencimento": m.km_vencimento, "KM Vencimento (km)": f"{formatar_valor_ptbr(m.km_vencimento)} km" if m.km_vencimento else "N/A",
+                "KM Vencimento": m.km_vencimento,
+                "KM Vencimento (km)": f"{formatar_valor_ptbr(m.km_vencimento)} km" if m.km_vencimento else "N/A",
                 "Data Vencimento": m.data_vencimento if m.data_vencimento else "N/A",
-                "Descrição": m.descricao, "Status": status, "Data Realização": m.data_realizacao,
+                "Descrição": m.descricao,
+                "Status": status,
+                "Status Raw": status,
+                "Data Realização": m.data_realizacao,
                 "Motivo": motivo
             })
         df = pd.DataFrame(dados_manutencoes)
         if filtro_status:
-            df = df[df["Status"].isin(filtro_status)]
+            df = df[df["Status Raw"].isin(filtro_status)]
         return df
     except Exception as e:
         st.error(f"Erro ao obter dados de manutenções: {e}")
@@ -159,7 +297,6 @@ def obter_dados_acessorios(filtro_status=None, session_instance=None):
     if not session_instance:
         return pd.DataFrame()
     try:
-        # Obter configurações de KM Aviso e Data Limite
         km_aviso = float(obter_configuracao("km_aviso", 1000.0, session_instance))
         data_limite_dias = float(obter_configuracao("data_limite_dias", 30.0, session_instance))
 
@@ -167,43 +304,39 @@ def obter_dados_acessorios(filtro_status=None, session_instance=None):
         if not acessorios:
             return pd.DataFrame()
         dados_acessorios = []
-        hoje = datetime.now().date()
         for a in acessorios:
             veiculo = session_instance.query(Veiculo).filter_by(id=a.veiculo_id).first()
             veiculo_nome = f"{veiculo.codigo} - {veiculo.placa} ({veiculo.modelo})" if veiculo else "Desconhecido"
-            hodometro_atual = veiculo.hodometro_atual if veiculo and veiculo.hodometro_atual is not None else a.km_instalacao
+            hodometro_atual = veiculo.hodometro_atual if veiculo else a.km_instalacao
 
-            vencido = False
-            alerta = False
-            motivo = ""
-            if getattr(a, 'tem_vencimento', False):
-                if a.data_vencimento:
-                    dias_restantes = (a.data_vencimento - hoje).days
-                    if dias_restantes < 0:
-                        vencido = True
-                        motivo = f"Vencido por data ({a.data_vencimento})"
-                    elif dias_restantes <= data_limite_dias:
-                        alerta = True
-                        motivo = f"Alerta por data ({dias_restantes} dias restantes)"
-                if a.km_vencimento and hodometro_atual is not None and hodometro_atual > a.km_vencimento:
-                    vencido = True
-                    motivo = f"Vencido por KM ({hodometro_atual} > {a.km_vencimento})"
-                elif a.km_vencimento and hodometro_atual is not None and (a.km_vencimento - hodometro_atual) <= km_aviso:
-                    alerta = True
-                    motivo = f"Alerta por KM ({a.km_vencimento - hodometro_atual} KM restantes)"
-            status = "Vencida" if vencido else "Alerta" if alerta else "Saudável"
+            if not veiculo:
+                continue
+            if hodometro_atual == 0.0:
+                continue
+
+            status, motivo = calcular_status(a, veiculo, km_aviso, data_limite_dias)
             dados_acessorios.append({
-                "ID": a.id, "Tipo de Registro": "Acessório", "Veículo": veiculo_nome, "Nome": a.nome,
-                "KM Instalação": a.km_instalacao, "KM Instalação (km)": f"{formatar_valor_ptbr(a.km_instalacao)} km",
-                "KM Vencimento": a.km_vencimento, "KM Vencimento (km)": f"{formatar_valor_ptbr(a.km_vencimento)} km" if a.km_vencimento else "N/A",
-                "Data Instalação": a.data_instalacao, "Data Vencimento": a.data_vencimento if a.data_vencimento else "N/A",
-                "Status": status, "Descrição": a.descricao, "Motivo": motivo,
-                "Hodômetro (km)": f"{formatar_valor_ptbr(hodometro_atual)} km",
-                "Valor (R$)": 0.0, "Valor Formatado (R$)": "N/A"
+                "ID": a.id,
+                "Tipo de Registro": "Acessório",
+                "Veículo": veiculo_nome,
+                "Nome": a.nome,
+                "KM Instalação": a.km_instalacao,
+                "KM Instalação (km)": f"{formatar_valor_ptbr(a.km_instalacao)} km",
+                "KM Vencimento": a.km_vencimento,
+                "KM Vencimento (km)": f"{formatar_valor_ptbr(a.km_vencimento)} km" if a.km_vencimento else "N/A",
+                "Data Instalação": a.data_instalacao,
+                "Data Vencimento": a.data_vencimento if a.data_vencimento else "N/A",
+                "Status": status,
+                "Status Raw": status,
+                "Descrição": a.descricao,
+                "Motivo": motivo,
+                "Hodômetro Atual (km)": f"{formatar_valor_ptbr(hodometro_atual)} km",
+                "Valor (R$)": 0.0,
+                "Valor Formatado (R$)": "N/A"
             })
         df = pd.DataFrame(dados_acessorios)
         if filtro_status:
-            df = df[df["Status"].isin(filtro_status)]
+            df = df[df["Status Raw"].isin(filtro_status)]
         return df
     except Exception as e:
         st.error(f"Erro ao obter dados de acessórios: {e}")
@@ -211,16 +344,29 @@ def obter_dados_acessorios(filtro_status=None, session_instance=None):
 
 if menu_principal == "Dashboard":
     st.title("📊 **Painel de Controle**")
+    
+    st.markdown('<div class="sync-button-container">', unsafe_allow_html=True)
+    if st.button("🔄 Sincronizar Dados de Veículos", key="sync_button", help="Clique para sincronizar os dados dos veículos e atualizar os hodômetros"):
+        if session:
+            try:
+                sincronizar_dados_veiculos(session, write_progress=False)
+                st.success("✅ Sincronização concluída com sucesso!")
+            except Exception as e:
+                st.error(f"❌ Erro ao sincronizar dados: {e}")
+        else:
+            st.error("❌ Erro: Não foi possível conectar ao banco de dados.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
     if not session:
         st.error("Não foi possível carregar o Dashboard devido a um erro na conexão com o banco de dados.")
     else:
         try:
             df_manutencoes = obter_dados_manutencoes(session_instance=session)
             total_manutencoes = len(df_manutencoes)
-            manutencoes_saudaveis = len(df_manutencoes[df_manutencoes["Status"] == "Saudável"])
-            manutencoes_alerta = len(df_manutencoes[df_manutencoes["Status"] == "Alerta"])
-            manutencoes_vencidas = len(df_manutencoes[df_manutencoes["Status"] == "Vencida"])
-            manutencoes_concluidas = len(df_manutencoes[df_manutencoes["Status"] == "Concluído"])
+            manutencoes_saudaveis = len(df_manutencoes[df_manutencoes["Status"] == "saudavel"])
+            manutencoes_alerta = len(df_manutencoes[df_manutencoes["Status"] == "alerta"])
+            manutencoes_vencidas = len(df_manutencoes[df_manutencoes["Status"] == "vencido"])
+            manutencoes_concluidas = len(df_manutencoes[df_manutencoes["Status"] == "concluído"])
             valor_total = df_manutencoes["Valor (R$)"].sum() or 0
         except Exception as e:
             st.error(f"Erro ao buscar dados principais: {e}")
@@ -232,31 +378,29 @@ if menu_principal == "Dashboard":
         with col2:
             st.markdown(f"""<div style="background-color: #2196F3; color: white; padding: 15px; border-radius: 10px; text-align: center;"><h5 style="margin: 0;">✅ Saudáveis</h5><p style="font-size: 24px; margin: 0;">{manutencoes_saudaveis}</p><p style="font-size: 14px; margin: 0;">(Em dia)</p></div>""", unsafe_allow_html=True)
         with col3:
-            st.markdown(f"""<div style="background-color: #FFC107; color: white; padding: 15px; border-radius: 10px; text-align: center;"><h5 style="margin: 0;">⚠️ Alerta</h5><p style="font-size: 24px; margin: 0;"><a href='?menu=Dashboard&filtro_status=Alerta' style='color: white; text-decoration: underline;' target='_self'>{manutencoes_alerta}</a></p><p style="font-size: 14px; margin: 0;">(Próximas)</p></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div style="background-color: #FFC107; color: white; padding: 15px; border-radius: 10px; text-align: center;"><h5 style="margin: 0;">⚠️ Alerta</h5><p style="font-size: 24px; margin: 0;"><a href='?menu=Dashboard&filtro_status=alerta' style='color: white; text-decoration: underline;' target='_self'>{manutencoes_alerta}</a></p><p style="font-size: 14px; margin: 0;">(Próximas)</p></div>""", unsafe_allow_html=True)
         with col4:
-            st.markdown(f"""<div style="background-color: #FF5722; color: white; padding: 15px; border-radius: 10px; text-align: center;"><h5 style="margin: 0;">⏰ Vencidas</h5><p style="font-size: 24px; margin: 0;"><a href='?menu=Dashboard&filtro_status=Vencida' style='color: white; text-decoration: underline;' target='_self'>{manutencoes_vencidas}</a></p><p style="font-size: 14px; margin: 0;">(Atrasadas)</p></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div style="background-color: #FF5722; color: white; padding: 15px; border-radius: 10px; text-align: center;"><h5 style="margin: 0;">⛔ Vencidas</h5><p style="font-size: 24px; margin: 0;"><a href='?menu=Dashboard&filtro_status=vencido' style='color: white; text-decoration: underline;' target='_self'>{manutencoes_vencidas}</a></p><p style="font-size: 14px; margin: 0;">(Atrasadas)</p></div>""", unsafe_allow_html=True)
         with col5:
-            st.markdown(f"""<div style="background-color: #9E9E9E; color: white; padding: 15px; border-radius: 10px; text-align: center;"><h5 style="margin: 0;">✔️ Concluídas</h5><p style="font-size: 24px; margin: 0;"><a href='?menu=Dashboard&filtro_status=Concluído' style='color: white; text-decoration: underline;' target='_self'>{manutencoes_concluidas}</a></p><p style="font-size: 14px; margin: 0;">(Finalizadas)</p></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div style="background-color: #9E9E9E; color: white; padding: 15px; border-radius: 10px; text-align: center;"><h5 style="margin: 0;">✅ Concluídas</h5><p style="font-size: 24px; margin: 0;"><a href='?menu=Dashboard&filtro_status=concluído' style='color: white; text-decoration: underline;' target='_self'>{manutencoes_concluidas}</a></p><p style="font-size: 14px; margin: 0;">(Finalizadas)</p></div>""", unsafe_allow_html=True)
 
-        # Controle da exibição da tabela com base no filtro
         filtro_status = st.query_params.get("filtro_status", None)
-        if filtro_status in ["Vencida", "Alerta", "Concluído"]:
+        if filtro_status in ["vencido", "alerta", "concluído"]:
             if 'show_table' not in st.session_state:
-                st.session_state.show_table = False
-            if st.session_state.show_table or st.button(f"Mostrar Tabela de {filtro_status}"):
                 st.session_state.show_table = True
+
+            if st.session_state.show_table:
                 st.markdown(f"### 📋 **Manutenções {filtro_status}**")
                 df_manutencoes = obter_dados_manutencoes(filtro_status=[filtro_status], session_instance=session)
                 df_acessorios = pd.DataFrame()
-                if filtro_status == "Alerta":
+                if filtro_status == "alerta":
                     df_acessorios = obter_dados_acessorios(filtro_status=[filtro_status], session_instance=session)
                 
-                # Combinar os dados de manutenções e acessórios
-                if filtro_status == "Alerta" and not df_manutencoes.empty and not df_acessorios.empty:
+                if filtro_status == "alerta" and not df_manutencoes.empty and not df_acessorios.empty:
                     df_combined = pd.concat([df_manutencoes, df_acessorios], ignore_index=True, sort=False)
-                elif filtro_status == "Alerta" and not df_manutencoes.empty:
+                elif filtro_status == "alerta" and not df_manutencoes.empty:
                     df_combined = df_manutencoes
-                elif filtro_status == "Alerta" and not df_acessorios.empty:
+                elif filtro_status == "alerta" and not df_acessorios.empty:
                     df_combined = df_acessorios
                 else:
                     df_combined = df_manutencoes if not df_manutencoes.empty else df_acessorios
@@ -264,12 +408,11 @@ if menu_principal == "Dashboard":
                 if df_combined.empty:
                     st.warning(f"⚠️ Nenhuma manutenção ou acessório encontrado no estado '{filtro_status}'!")
                 else:
-                    # Ajustar colunas por status
-                    if filtro_status == "Vencida":
+                    if filtro_status == "vencido":
                         df_display = df_combined[["ID", "Tipo de Registro", "Veículo", "Categoria", "Tipo", "KM Vencimento (km)", "Data Vencimento", "Status", "Motivo"]]
-                    elif filtro_status == "Alerta":
-                        df_display = df_combined[["ID", "Tipo de Registro", "Veículo", "Hodômetro (km)", "KM Vencimento (km)", "Data Vencimento", "Status", "Motivo"]]
-                    elif filtro_status == "Concluído":
+                    elif filtro_status == "alerta":
+                        df_display = df_combined[["ID", "Tipo de Registro", "Veículo", "Hodômetro Atual (km)", "KM Vencimento (km)", "Data Vencimento", "Status", "Motivo"]]
+                    elif filtro_status == "concluído":
                         df_display = df_combined[["ID", "Tipo de Registro", "Veículo", "Categoria", "Tipo", "Data Manutenção", "Data Realização", "Valor Formatado (R$)", "Status"]]
                     df_display["Status"] = df_display["Status"].apply(adicionar_emoji_status)
                     st.dataframe(df_display, use_container_width=True, height=300)
@@ -277,8 +420,11 @@ if menu_principal == "Dashboard":
                     total_valor = df_combined["Valor (R$)"].sum()
                     total_valor_formatado = formatar_valor_monetario(total_valor)
                     st.markdown(f"""<div style="background-color: #2e7d32; padding: 15px; border-radius: 5px; color: white; font-size: 18px;">Total de Registros: {total_manutencoes}<br>Valor Total (R$): {total_valor_formatado}</div>""", unsafe_allow_html=True)
-            elif st.button("Ocultar Tabela"):
-                st.session_state.show_table = False
+
+                if st.button("Ocultar Tabela"):
+                    st.session_state.show_table = False
+                    st.query_params.clear()
+                    st.rerun()
 
         st.markdown("### 📈 **Distribuição de Manutenções**")
         try:
@@ -386,4 +532,4 @@ elif menu_principal == "Relatórios":
     relatorios.exibir_relatorios()
 
 elif menu_principal == "Configurações":
-    configuracoes.exibir_configuracoes()
+    configuracoes.exibir_configuracoes(session=session, sincronizar_dados_veiculos=sincronizar_dados_veiculos)

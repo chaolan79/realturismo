@@ -6,7 +6,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(BASE_DIR)
 
 from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Boolean, ForeignKey
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship  # Adicionado relationship
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 import os
 import sys
 
@@ -56,16 +56,16 @@ except Exception as e:
     print(f"Erro ao criar o engine do SQLAlchemy: {e}")
     sys.exit(1)
 
-Base = declarative_base()  # Atualizado para usar sqlalchemy.orm.declarative_base()
+Base = declarative_base()
 
 # Tabela de Veículos
 class Veiculo(Base):
     __tablename__ = 'Veiculo'
     id = Column(Integer, primary_key=True, autoincrement=True)
-    codigo = Column(Integer, unique=True, nullable=False)
-    placa = Column(String, unique=True, nullable=False)
-    modelo = Column(String, nullable=False)
-    fabricante = Column(String, nullable=False)
+    codigo = Column(Integer, unique=True, nullable=False)  # Código como inteiro, sem limite de caracteres
+    placa = Column(String(8), unique=True, nullable=False)  # Limite de 8 caracteres
+    modelo = Column(String(100), nullable=False)  # Limite de 100 caracteres
+    fabricante = Column(String(50), nullable=False)  # Limite de 50 caracteres
     hodometro_atual = Column(Float, nullable=False)
     abastecimentos = relationship("Abastecimento", back_populates="veiculo")
 
@@ -73,46 +73,45 @@ class Veiculo(Base):
 class Categoria(Base):
     __tablename__ = 'Categoria'
     id = Column(Integer, primary_key=True, autoincrement=True)
-    nome = Column(String, unique=True, nullable=False)
+    nome = Column(String(50), unique=True, nullable=False)  # Limite de 50 caracteres
 
 # Tabela de Responsáveis
 class Responsavel(Base):
     __tablename__ = 'Responsavel'
     id = Column(Integer, primary_key=True, autoincrement=True)
-    nome = Column(String, unique=True, nullable=False)
+    nome = Column(String(100), unique=True, nullable=False)  # Limite de 100 caracteres
 
 # Tabela de Oficinas
 class Oficina(Base):
     __tablename__ = 'Oficina'
     id = Column(Integer, primary_key=True, autoincrement=True)
-    nome = Column(String, unique=True, nullable=False)
-    endereco = Column(String, nullable=True)
-    telefone = Column(String, nullable=True)
+    nome = Column(String(100), unique=True, nullable=False)  # Limite de 100 caracteres
+    endereço = Column(String(200))  # Limite de 200 caracteres
+    telefone = Column(String(20))  # Limite de 20 caracteres
 
 # Tabela de Acessórios
 class Acessorio(Base):
     __tablename__ = 'Acessorio'
     id = Column(Integer, primary_key=True, autoincrement=True)
     veiculo_id = Column(Integer, ForeignKey('Veiculo.id'), nullable=False)
-    nome = Column(String, nullable=False)
+    nome = Column(String(50), nullable=False)  # Limite de 50 caracteres
     km_instalacao = Column(Float, nullable=False)
     km_vencimento = Column(Float)
     data_instalacao = Column(Date, nullable=False)
     data_vencimento = Column(Date)
     tem_vencimento = Column(Boolean, default=True)
-    status = Column(String, nullable=False)
-    # vencido removido, já que não existe no banco
-    descricao = Column(String)
+    status = Column(String(20), nullable=False)  # Limite de 20 caracteres
+    descricao = Column(String(500))  # Limite de 500 caracteres
 
 # Tabela de Manutenções
 class Manutencao(Base):
     __tablename__ = 'Manutencao'
     id = Column(Integer, primary_key=True, autoincrement=True)
     veiculo_id = Column(Integer, ForeignKey('Veiculo.id'), nullable=False)
-    categoria = Column(String, ForeignKey('Categoria.nome'), nullable=False)
-    responsavel = Column(String, ForeignKey('Responsavel.nome'), nullable=False)
-    oficina = Column(String, ForeignKey('Oficina.nome'), nullable=False)
-    tipo = Column(String, nullable=False)
+    categoria = Column(String(50), ForeignKey('Categoria.nome'), nullable=False)  # Limite de 50 caracteres
+    responsavel = Column(String(100), ForeignKey('Responsavel.nome'), nullable=False)  # Limite de 100 caracteres
+    oficina = Column(String(100), ForeignKey('Oficina.nome'), nullable=False)  # Limite de 100 caracteres
+    tipo = Column(String(20), nullable=False)  # Limite de 20 caracteres
     km_aviso = Column(Float, nullable=False)
     data_manutencao = Column(Date, nullable=False)
     hodometro_manutencao = Column(Float, nullable=False)
@@ -120,16 +119,15 @@ class Manutencao(Base):
     km_vencimento = Column(Float, nullable=False)
     data_vencimento = Column(Date)
     tem_vencimento = Column(Boolean, default=True)
-    # vencido removido, já que foi mapeado para tem_vencimento no banco
-    descricao = Column(String, nullable=False)
-    status = Column(String)  # Removida restrição NOT NULL para alinhar com o banco
-    data_realizacao = Column(DateTime)  # Ajustado para DateTime, removida restrição NOT NULL
+    descricao = Column(String(500), nullable=False)  # Limite de 500 caracteres
+    status = Column(String(20))  # Limite de 20 caracteres
+    data_realizacao = Column(DateTime)
 
 # Tabela de Configurações
 class Configuracao(Base):
     __tablename__ = 'configuracoes'
     id = Column(Integer, primary_key=True, index=True)
-    chave = Column(String, unique=True, nullable=False)
+    chave = Column(String(50), unique=True, nullable=False)  # Limite de 50 caracteres
     valor = Column(Float, nullable=False)
 
 # Tabela de Abastecimentos
@@ -142,7 +140,7 @@ class Abastecimento(Base):
     km_rodado = Column(Float, nullable=True)
     litros_abastecido = Column(Float, nullable=True)
     valor_abastecido = Column(Float, nullable=True)
-    tipo_combustivel = Column(String, nullable=True)
+    tipo_combustivel = Column(String(20), nullable=True)  # Limite de 20 caracteres
     veiculo = relationship("Veiculo", back_populates="abastecimentos")
 
 # Criar tabelas

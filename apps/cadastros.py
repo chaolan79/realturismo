@@ -15,15 +15,17 @@ def exibir_cadastros():
 
         with st.form(key="cadastro_veiculo", clear_on_submit=True):
             codigo = st.number_input("🔢 **Código**", min_value=1, step=1)
-            placa = st.text_input("📜 **Placa**")
-            modelo = st.text_input("🚘 **Modelo**")
-            fabricante = st.text_input("🏭 **Fabricante**")
+            placa = st.text_input("📜 **Placa**", max_chars=8)  # Limite de 8 caracteres
+            modelo = st.text_input("🚘 **Modelo**", max_chars=100)  # Limite de 100 caracteres
+            fabricante = st.text_input("🏭 **Fabricante**", max_chars=50)  # Limite de 50 caracteres
             hodometro_atual = st.number_input("⏳ **Hodômetro Atual (km)**", min_value=0.0, step=1.0, format="%.2f")
             submit_button = st.form_submit_button(label="✅ **Cadastrar Veículo**")
 
             if submit_button:
                 if not placa or not modelo or not fabricante:
                     st.error("⚠️ Preencha todos os campos obrigatórios!")
+                elif hodometro_atual <= 0.0:
+                    st.error("⚠️ O hodômetro atual deve ser maior que 0.0 km!")
                 else:
                     try:
                         novo_veiculo = Veiculo(
@@ -47,13 +49,17 @@ def exibir_cadastros():
         else:
             dados_veiculos = []
             for v in veiculos:
+                hodometro_formatado = f"{v.hodometro_atual:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                # Adicionar um aviso se o hodômetro for zerado
+                if v.hodometro_atual == 0.0:
+                    hodometro_formatado += " ⚠️ (Hodômetro zerado)"
                 dados_veiculos.append({
                     "ID": v.id,
                     "Código": v.codigo,
                     "Placa": v.placa,
                     "Modelo": v.modelo,
                     "Fabricante": v.fabricante,
-                    "Hodômetro Atual (km)": f"{v.hodometro_atual:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    "Hodômetro Atual (km)": hodometro_formatado
                 })
             df = pd.DataFrame(dados_veiculos)
             st.dataframe(df, use_container_width=True)
@@ -78,9 +84,9 @@ def exibir_cadastros():
             veiculo = st.session_state['veiculo_selecionado']
             with st.form(key="editar_veiculo"):
                 codigo = st.number_input("🔢 **Código**", min_value=1, step=1, value=veiculo.codigo)
-                placa = st.text_input("📜 **Placa**", value=veiculo.placa)
-                modelo = st.text_input("🚘 **Modelo**", value=veiculo.modelo)
-                fabricante = st.text_input("🏭 **Fabricante**", value=veiculo.fabricante)
+                placa = st.text_input("📜 **Placa**", value=veiculo.placa, max_chars=8)  # Limite de 8 caracteres
+                modelo = st.text_input("🚘 **Modelo**", value=veiculo.modelo, max_chars=100)  # Limite de 100 caracteres
+                fabricante = st.text_input("🏭 **Fabricante**", value=veiculo.fabricante, max_chars=50)  # Limite de 50 caracteres
                 hodometro_atual = st.number_input("⏳ **Hodômetro Atual (km)**", min_value=0.0, step=1.0, format="%.2f", value=veiculo.hodometro_atual)
                 col1, col2 = st.columns(2)
                 with col1:
@@ -89,19 +95,24 @@ def exibir_cadastros():
                     excluir_button = st.form_submit_button(label="🗑️ Excluir")
 
                 if alterar_button:
-                    try:
-                        veiculo.codigo = codigo
-                        veiculo.placa = placa.upper()
-                        veiculo.modelo = modelo
-                        veiculo.fabricante = fabricante
-                        veiculo.hodometro_atual = hodometro_atual
-                        session.commit()
-                        st.success(f"✅ Veículo ID {veiculo.id} alterado com sucesso!")
-                        st.session_state.pop('veiculo_selecionado', None)
-                        st.session_state.pop('confirmar_exclusao_veiculo', None)
-                    except Exception as e:
-                        session.rollback()
-                        st.error(f"❌ Erro ao alterar veículo: {str(e)}")
+                    if not placa or not modelo or not fabricante:
+                        st.error("⚠️ Preencha todos os campos obrigatórios!")
+                    elif hodometro_atual <= 0.0:
+                        st.error("⚠️ O hodômetro atual deve ser maior que 0.0 km!")
+                    else:
+                        try:
+                            veiculo.codigo = codigo
+                            veiculo.placa = placa.upper()
+                            veiculo.modelo = modelo
+                            veiculo.fabricante = fabricante
+                            veiculo.hodometro_atual = hodometro_atual
+                            session.commit()
+                            st.success(f"✅ Veículo ID {veiculo.id} alterado com sucesso!")
+                            st.session_state.pop('veiculo_selecionado', None)
+                            st.session_state.pop('confirmar_exclusao_veiculo', None)
+                        except Exception as e:
+                            session.rollback()
+                            st.error(f"❌ Erro ao alterar veículo: {str(e)}")
 
                 if excluir_button:
                     st.session_state['confirmar_exclusao_veiculo'] = True
@@ -123,7 +134,7 @@ def exibir_cadastros():
         st.subheader("🔩 **Cadastro de Categorias**")
 
         with st.form(key="cadastro_categoria", clear_on_submit=True):
-            nome = st.text_input("📋 **Nome da Categoria**")
+            nome = st.text_input("📋 **Nome da Categoria**", max_chars=50)  # Limite de 50 caracteres
             submit_button = st.form_submit_button(label="✅ **Cadastrar Categoria**")
 
             if submit_button:
@@ -167,7 +178,7 @@ def exibir_cadastros():
         if 'categoria_selecionada' in st.session_state:
             categoria = st.session_state['categoria_selecionada']
             with st.form(key="editar_categoria"):
-                nome = st.text_input("📋 **Nome da Categoria**", value=categoria.nome)
+                nome = st.text_input("📋 **Nome da Categoria**", value=categoria.nome, max_chars=50)  # Limite de 50 caracteres
                 col1, col2 = st.columns(2)
                 with col1:
                     alterar_button = st.form_submit_button(label="💾 Aplicar")
@@ -205,7 +216,7 @@ def exibir_cadastros():
         st.subheader("👤 **Cadastro de Responsáveis**")
 
         with st.form(key="cadastro_responsavel", clear_on_submit=True):
-            nome = st.text_input("👤 **Nome do Responsável**")
+            nome = st.text_input("👤 **Nome do Responsável**", max_chars=100)  # Limite de 100 caracteres
             submit_button = st.form_submit_button(label="✅ **Cadastrar Responsável**")
 
             if submit_button:
@@ -249,7 +260,7 @@ def exibir_cadastros():
         if 'responsavel_selecionado' in st.session_state:
             responsavel = st.session_state['responsavel_selecionado']
             with st.form(key="editar_responsavel"):
-                nome = st.text_input("👤 **Nome do Responsável**", value=responsavel.nome)
+                nome = st.text_input("👤 **Nome do Responsável**", value=responsavel.nome, max_chars=100)  # Limite de 100 caracteres
                 col1, col2 = st.columns(2)
                 with col1:
                     alterar_button = st.form_submit_button(label="💾 Aplicar")
@@ -287,9 +298,9 @@ def exibir_cadastros():
         st.subheader("🏢 **Cadastro de Oficinas**")
 
         with st.form(key="cadastro_oficina", clear_on_submit=True):
-            nome = st.text_input("🏢 **Nome da Oficina**")
-            endereco = st.text_input("📍 **Endereço**")
-            telefone = st.text_input("📞 **Telefone**")
+            nome = st.text_input("🏢 **Nome da Oficina**", max_chars=100)  # Limite de 100 caracteres
+            endereço = st.text_input("📍 **Endereço**", max_chars=200)  # Limite de 200 caracteres
+            telefone = st.text_input("📞 **Telefone**", max_chars=20)  # Limite de 20 caracteres
             submit_button = st.form_submit_button(label="✅ **Cadastrar Oficina**")
 
             if submit_button:
@@ -297,7 +308,7 @@ def exibir_cadastros():
                     st.error("⚠️ Informe o nome da oficina!")
                 else:
                     try:
-                        nova_oficina = Oficina(nome=nome, endereco=endereco, telefone=telefone)
+                        nova_oficina = Oficina(nome=nome, endereço=endereço, telefone=telefone)
                         session.add(nova_oficina)
                         session.commit()
                         st.success(f"✅ Oficina {nome} cadastrada com sucesso!")
@@ -310,7 +321,7 @@ def exibir_cadastros():
         if not oficinas:
             st.warning("⚠️ Nenhuma oficina cadastrada!")
         else:
-            dados_oficinas = [{"ID": o.id, "Nome": o.nome, "Endereço": o.endereco, "Telefone": o.telefone} for o in oficinas]
+            dados_oficinas = [{"ID": o.id, "Nome": o.nome, "Endereço": o.endereço, "Telefone": o.telefone} for o in oficinas]
             df = pd.DataFrame(dados_oficinas)
             st.dataframe(df, use_container_width=True)
 
@@ -333,9 +344,9 @@ def exibir_cadastros():
         if 'oficina_selecionada' in st.session_state:
             oficina = st.session_state['oficina_selecionada']
             with st.form(key="editar_oficina"):
-                nome = st.text_input("🏢 **Nome da Oficina**", value=oficina.nome)
-                endereco = st.text_input("📍 **Endereço**", value=oficina.endereco)
-                telefone = st.text_input("📞 **Telefone**", value=oficina.telefone)
+                nome = st.text_input("🏢 **Nome da Oficina**", value=oficina.nome, max_chars=100)  # Limite de 100 caracteres
+                endereço = st.text_input("📍 **Endereço**", value=oficina.endereço if oficina.endereço else "", max_chars=200)  # Limite de 200 caracteres
+                telefone = st.text_input("📞 **Telefone**", value=oficina.telefone if oficina.telefone else "", max_chars=20)  # Limite de 20 caracteres
                 col1, col2 = st.columns(2)
                 with col1:
                     alterar_button = st.form_submit_button(label="💾 Aplicar")
@@ -345,7 +356,7 @@ def exibir_cadastros():
                 if alterar_button:
                     try:
                         oficina.nome = nome
-                        oficina.endereco = endereco
+                        oficina.endereço = endereço
                         oficina.telefone = telefone
                         session.commit()
                         st.success(f"✅ Oficina ID {oficina.id} alterada com sucesso!")
