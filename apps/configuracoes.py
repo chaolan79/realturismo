@@ -182,7 +182,7 @@ def configurar_geral():
 
 def configurar_sincronizacao_veiculos(session, sincronizar_dados_veiculos):
     st.subheader("🌐 **Sincronização de Dados de Veículos**")
-    st.markdown("Atualize os hodômetros dos veículos manualmente clicando no botão abaixo.")
+    st.markdown("Atualize os hodômetros dos veículos e os registros de abastecimento manualmente clicando no botão abaixo.")
     
     # Exibir o estado atual da sincronização
     estado_sincronizacao = get_ultimo_id_processado()
@@ -194,132 +194,202 @@ def configurar_sincronizacao_veiculos(session, sincronizar_dados_veiculos):
             # Configuração da API
             api_url = "http://89.116.214.34:8000/api/abastecimentos/"
             headers = {"Authorization": "Token c6f5a268b3f1bc95c875a8203ad1562f47dcf0ad"}
-            params = {"EValidado": "", "veiculo": "", "month": "", "year": "2025", "page": 1, "perPage": 100}
+            params = {"EValidado": "", "veiculo": "", "month": "", "year": "", "page": 1, "perPage": 100}
 
             session_requests = requests.Session()
             retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
             session_requests.mount("http://", HTTPAdapter(max_retries=retries))
             TIMEOUT = 30
 
-            # Etapa 1: Testar conexão com a API
-            st.info("⏳ Etapa 1/5: Testando conexão com a API...")
-            try:
-                test_response = session_requests.get(api_url, headers=headers, params=params, timeout=TIMEOUT)
-                test_response.raise_for_status()
-                st.success("✅ Conexão com a API estabelecida com sucesso!")
-            except requests.exceptions.RequestException as e:
-                st.error(f"❌ Falha ao conectar à API: {str(e)}")
-                return
+            # Obter o último ID processado
+            ultimo_id_processado = estado_sincronizacao['ultimo_id_processado']
+            novo_ultimo_id_processado = ultimo_id_processado
 
-            # Opção de forçar sincronização
-            forcar_atualizacao = st.checkbox("Forçar sincronização (sobrescrever todos os hodômetros)", value=False)
+            # Criar um expander para os logs analíticos
+            with st.expander("📋 Logs Analíticos da Sincronização", expanded=False):
+                log_area = st.empty()
+                logs = []
 
-            hodometros_veiculos = {}
-            total_paginas_processadas = 0
-            ultimo_id_processado = 0
-            registros_ignorados = 0
+                def adicionar_log(mensagem):
+                    logs.append(mensagem)
+                    log_area.write("\n".join(logs))
 
-            # Etapa 2: Buscar dados da API
-            st.info("⏳ Etapa 2/5: Buscando dados da API...")
-            while True:
-                st.info(f"📥 Processando página {params['page']}...")
+                # Etapa 1: Testar conexão com a API
+                adicionar_log("⏳ Etapa 1/5: Testando conexão com a API...")
                 try:
-                    response = session_requests.get(api_url, headers=headers, params=params, timeout=TIMEOUT)
-                    response.raise_for_status()
+                    test_response = session_requests.get(api_url, headers=headers, params=params, timeout=TIMEOUT)
+                    test_response.raise_for_status()
+                    adicionar_log("✅ Conexão com a API estabelecida com sucesso!")
                 except requests.exceptions.RequestException as e:
-                    st.error(f"❌ Erro ao acessar a API na página {params['page']}: {str(e)}")
+                    adicionar_log(f"❌ Falha ao conectar à API: {str(e)}")
+                    st.error(f"❌ Falha ao conectar à API: {str(e)}")
                     return
 
-                dados_api = response.json()
-                resultados = dados_api.get("results", [])
+                hodometros_veiculos = {}
+                total_paginas_processadas = 0
+                registros_ignorados = 0
+                registros_processados = 0
+                abastecimentos_adicionados = 0
+                veiculos_atualizados = 0
+                veiculos_nao_encontrados = 0
 
-                for item in resultados:
-                    codigo = str(item.get("veiculo"))
-                    hodometro = float(item.get("hodometro", 0.0))
-                    data_str = item.get("data")
-                    id_registro = item.get("id", 0)
-
+                # Etapa 2: Buscar dados da API
+                adicionar_log("⏳ Etapa 2/5: Buscando dados da API...")
+                while True:
+                    adicionar_log(f"📥 Processando página {params['page']}...")
                     try:
-                        data = datetime.fromisoformat(data_str.replace("Z", "+00:00"))
-                        data = data.replace(tzinfo=None)
-                    except ValueError:
-                        st.warning(f"⚠️ Data inválida para o veículo {codigo}: {data_str}. Ignorando registro.")
-                        registros_ignorados += 1
-                        continue
+                        response = session_requests.get(api_url, headers=headers, params=params, timeout=TIMEOUT)
+                        response.raise_for_status()
+                    except requests.exceptions.RequestException as e:
+                        adicionar_log(f"❌ Erro ao acessar a API na página {params['page']}: {str(e)}")
+                        st.error(f"❌ Erro ao acessar a API na página {params['page']}: {str(e)}")
+                        return
 
-                    if hodometro <= 0.0:
-                        st.warning(f"⚠️ Hodômetro inválido (0.0 km) para o veículo {codigo}. Ignorando registro.")
-                        registros_ignorados += 1
-                        continue
+                    dados_api = response.json()
+                    resultados = dados_api.get("results", [])
 
-                    if codigo in hodometros_veiculos:
-                        if data > hodometros_veiculos[codigo]["data"]:
-                            hodometros_veiculos[codigo] = {"hodometro": hodometro, "data": data, "id": id_registro}
-                    else:
-                        hodometros_veiculos[codigo] = {"hodometro": hodometro, "data": data, "id": id_registro}
+                    for item in resultados:
+                        # Extrair dados do abastecimento
+                        codigo = str(item.get("veiculo_detail", {}).get("codigo"))
+                        hodometro = float(item.get("hodometro", 0.0))
+                        abastecimento_id = item.get("id")
+                        veiculo_id_api = item.get("veiculo")
+                        data_abastecimento_str = item.get("horario")
+                        litros = float(item.get("litros", 0.0))
+                        valor = float(item.get("valor", 0.0))
 
-                    if id_registro > ultimo_id_processado:
-                        ultimo_id_processado = id_registro
+                        # Ignorar registros já processados
+                        if abastecimento_id <= ultimo_id_processado:
+                            registros_ignorados += 1
+                            adicionar_log(f"ℹ️ Registro ID {abastecimento_id} ignorado (já processado).")
+                            continue
 
-                total_paginas_processadas += 1
-                next_url = dados_api.get("next")
-                if not next_url:
-                    break
-                params["page"] += 1
+                        # Converter a data do abastecimento
+                        try:
+                            data_abastecimento = datetime.strptime(data_abastecimento_str, "%d/%m/%Y %H:%M:%S")
+                        except (ValueError, TypeError):
+                            registros_ignorados += 1
+                            adicionar_log(f"⚠️ Data inválida para o registro ID {abastecimento_id}: {data_abastecimento_str}. Ignorando.")
+                            continue
 
-            st.success(f"✅ Etapa 2/5 concluída: {total_paginas_processadas} páginas processadas, {registros_ignorados} registros ignorados.")
+                        # Ignorar hodômetros inválidos
+                        if hodometro <= 0.0:
+                            registros_ignorados += 1
+                            adicionar_log(f"⚠️ Hodômetro inválido ({hodometro} km) para o registro ID {abastecimento_id}. Ignorando.")
+                            continue
 
-            # Etapa 3: Carregar veículos do banco de dados
-            st.info("⏳ Etapa 3/5: Carregando veículos do banco de dados...")
-            veiculos = session.query(Veiculo).all()
-            veiculos_dict = {str(v.codigo): v for v in veiculos}
-            st.success(f"✅ {len(veiculos)} veículos carregados do banco.")
+                        registros_processados += 1
+                        if abastecimento_id > novo_ultimo_id_processado:
+                            novo_ultimo_id_processado = abastecimento_id
 
-            # Etapa 4: Atualizar hodômetros
-            atualizados = 0
-            nao_encontrados = 0
-            ignorados_por_data = 0
-
-            st.info("⏳ Etapa 4/5: Atualizando hodômetros dos veículos...")
-            for codigo, dados in hodometros_veiculos.items():
-                hodometro = dados["hodometro"]
-                if codigo in veiculos_dict:
-                    veiculo = veiculos_dict[codigo]
-                    if forcar_atualizacao or veiculo.hodometro_atual == 0.0:
-                        veiculo.hodometro_atual = hodometro
-                        atualizados += 1
-                        st.info(f"🚗 Veículo {codigo} atualizado: hodômetro {hodometro} km (forçado ou hodômetro zerado)")
-                    else:
-                        ultimo_abastecimento = session.query(Abastecimento).filter_by(veiculo_id=veiculo.id).order_by(Abastecimento.data.desc()).first()
-                        data_ultimo_abastecimento = ultimo_abastecimento.data if ultimo_abastecimento else datetime.min
-                        if hasattr(data_ultimo_abastecimento, 'tzinfo') and data_ultimo_abastecimento.tzinfo is not None:
-                            data_ultimo_abastecimento = data_ultimo_abastecimento.replace(tzinfo=None)
-                        if dados["data"] > data_ultimo_abastecimento:
-                            veiculo.hodometro_atual = hodometro
-                            atualizados += 1
-                            st.info(f"🚗 Veículo {codigo} atualizado: hodômetro {hodometro} km (data mais recente)")
+                        # Adicionar ao dicionário de hodômetros
+                        if codigo in hodometros_veiculos:
+                            if data_abastecimento > hodometros_veiculos[codigo]["data"]:
+                                hodometros_veiculos[codigo] = {
+                                    "hodometro": hodometro,
+                                    "data": data_abastecimento,
+                                    "id": abastecimento_id
+                                }
                         else:
-                            ignorados_por_data += 1
-                            st.info(f"ℹ️ Veículo {codigo} não atualizado: data da API ({dados['data']}) não é mais recente que o último abastecimento ({data_ultimo_abastecimento})")
-                else:
-                    nao_encontrados += 1
-                    st.warning(f"⚠️ Veículo com código {codigo} não encontrado no banco.")
+                            hodometros_veiculos[codigo] = {
+                                "hodometro": hodometro,
+                                "data": data_abastecimento,
+                                "id": abastecimento_id
+                            }
 
-            # Etapa 5: Salvar alterações
-            st.info("⏳ Etapa 5/5: Salvando alterações no banco de dados...")
-            session.commit()
-            data_atual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            atualizar_estado_integracao(ultimo_id_processado, data_atual)
+                    total_paginas_processadas += 1
+                    next_url = dados_api.get("next")
+                    if not next_url:
+                        break
+                    params["page"] += 1
 
-            # Resumo final
+                adicionar_log(f"✅ Etapa 2/5 concluída: {total_paginas_processadas} páginas processadas, {registros_processados} registros processados, {registros_ignorados} registros ignorados.")
+
+                # Etapa 3: Carregar veículos do banco de dados
+                adicionar_log("⏳ Etapa 3/5: Carregando veículos do banco de dados...")
+                veiculos = session.query(Veiculo).all()
+                veiculos_dict = {str(v.codigo): v for v in veiculos}
+                adicionar_log(f"✅ {len(veiculos)} veículos carregados do banco.")
+
+                # Etapa 4: Processar registros e salvar abastecimentos
+                adicionar_log("⏳ Etapa 4/5: Processando registros e salvando abastecimentos...")
+                for item in resultados:
+                    codigo = str(item.get("veiculo_detail", {}).get("codigo"))
+                    hodometro = float(item.get("hodometro", 0.0))
+                    abastecimento_id = item.get("id")
+                    data_abastecimento_str = item.get("horario")
+                    litros = float(item.get("litros", 0.0))
+                    valor = float(item.get("valor", 0.0))
+
+                    # Ignorar registros já processados (verificação redundante para segurança)
+                    if abastecimento_id <= ultimo_id_processado:
+                        continue
+
+                    # Converter a data do abastecimento
+                    try:
+                        data_abastecimento = datetime.strptime(data_abastecimento_str, "%d/%m/%Y %H:%M:%S")
+                    except (ValueError, TypeError):
+                        continue
+
+                    # Ignorar hodômetros inválidos
+                    if hodometro <= 0.0:
+                        continue
+
+                    # Verificar se o abastecimento já existe no banco
+                    abastecimento_existente = session.query(Abastecimento).filter_by(id=abastecimento_id).first()
+                    if not abastecimento_existente:
+                        veiculo = veiculos_dict.get(codigo)
+                        if veiculo:
+                            novo_abastecimento = Abastecimento(
+                                id=abastecimento_id,
+                                veiculo_id=veiculo.id,
+                                data_abastecimento=data_abastecimento,
+                                hodometro=hodometro,
+                                litros=litros,
+                                valor=valor
+                            )
+                            session.add(novo_abastecimento)
+                            abastecimentos_adicionados += 1
+                            adicionar_log(f"✅ Abastecimento ID {abastecimento_id} adicionado para o veículo {codigo}.")
+                        else:
+                            veiculos_nao_encontrados += 1
+                            adicionar_log(f"⚠️ Veículo com código {codigo} não encontrado no banco para o abastecimento ID {abastecimento_id}.")
+
+                # Etapa 5: Atualizar hodômetros dos veículos
+                adicionar_log("⏳ Etapa 5/5: Atualizando hodômetros dos veículos...")
+                for codigo, dados in hodometros_veiculos.items():
+                    hodometro = dados["hodometro"]
+                    data_abastecimento = dados["data"]
+                    if codigo in veiculos_dict:
+                        veiculo = veiculos_dict[codigo]
+                        ultimo_abastecimento = session.query(Abastecimento).filter_by(veiculo_id=veiculo.id).order_by(Abastecimento.data_abastecimento.desc()).first()
+                        data_ultimo_abastecimento = ultimo_abastecimento.data_abastecimento if ultimo_abastecimento else datetime.min
+                        if data_abastecimento > data_ultimo_abastecimento:
+                            veiculo.hodometro_atual = hodometro
+                            veiculos_atualizados += 1
+                            adicionar_log(f"🚗 Veículo {codigo} atualizado: hodômetro {hodometro} km (data mais recente: {data_abastecimento}).")
+                        else:
+                            adicionar_log(f"ℹ️ Veículo {codigo} não atualizado: data da API ({data_abastecimento}) não é mais recente que o último abastecimento ({data_ultimo_abastecimento}).")
+                    else:
+                        veiculos_nao_encontrados += 1
+                        adicionar_log(f"⚠️ Veículo com código {codigo} não encontrado no banco.")
+
+                # Salvar alterações no banco
+                session.commit()
+                data_atual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                atualizar_estado_integracao(novo_ultimo_id_processado, data_atual)
+                adicionar_log(f"✅ Sincronização concluída com sucesso!")
+
+            # Exibir resumo fora do expander
             st.success(f"✅ Sincronização concluída!")
             st.markdown("### 📋 Resumo da Sincronização")
             st.write(f"**Páginas Processadas**: {total_paginas_processadas}")
-            st.write(f"**Veículos Atualizados**: {atualizados}")
-            st.write(f"**Veículos Não Encontrados**: {nao_encontrados}")
-            st.write(f"**Veículos Ignorados (data não recente)**: {ignorados_por_data}")
-            st.write(f"**Registros Ignorados (hodômetro inválido ou data inválida)**: {registros_ignorados}")
-            st.write(f"**Último ID Processado**: {ultimo_id_processado}")
+            st.write(f"**Registros Processados**: {registros_processados}")
+            st.write(f"**Registros Ignorados**: {registros_ignorados}")
+            st.write(f"**Abastecimentos Adicionados**: {abastecimentos_adicionados}")
+            st.write(f"**Veículos Atualizados**: {veiculos_atualizados}")
+            st.write(f"**Veículos Não Encontrados**: {veiculos_nao_encontrados}")
+            st.write(f"**Último ID Processado**: {novo_ultimo_id_processado}")
             st.write(f"**Data da Sincronização**: {data_atual}")
 
         except Exception as e:
