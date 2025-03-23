@@ -195,6 +195,11 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
         veiculos = session_instance.query(Veiculo).all()
         veiculos_dict = {str(v.codigo): v for v in veiculos}
 
+        # Verificar veículos com hodômetro zerado antes da sincronização
+        veiculos_zerados_antes = [str(v.codigo) for v in veiculos if v.hodometro_atual == 0]
+        if veiculos_zerados_antes and write_progress:
+            st.warning(f"⚠️ Antes da sincronização, os seguintes veículos estão com hodômetro zerado: {', '.join(veiculos_zerados_antes)}")
+
         # Buscar dados para cada mês/ano no intervalo
         for mes, ano in meses_anos:
             params = {
@@ -253,10 +258,10 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
                     if hodometro <= 0.0:  # Ignorar valores inválidos (apenas menores ou iguais a 0)
                         continue
                     if codigo in hodometros_veiculos:
-                        if hodometro > hodometros_veiculos[codigo]["hodometro"]:
-                            hodometros_veiculos[codigo] = {"hodometro": hodometro}
+                        if data_abastecimento > hodometros_veiculos[codigo]["data"]:
+                            hodometros_veiculos[codigo] = {"hodometro": hodometro, "data": data_abastecimento}
                     else:
-                        hodometros_veiculos[codigo] = {"hodometro": hodometro}
+                        hodometros_veiculos[codigo] = {"hodometro": hodometro, "data": data_abastecimento}
 
                 next_url = dados_api.get("next")
                 if not next_url:
@@ -264,16 +269,38 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
                 params["page"] += 1
 
         # Atualizar o hodometro_atual apenas dos veículos que têm registros na API
-        # Veículos sem registros nos últimos 30 dias manterão seu hodometro_atual atual
+        veiculos_zerados = []
+        veiculos_nao_atualizados = []
         for codigo, dados in hodometros_veiculos.items():
             hodometro = dados["hodometro"]
+            data_abastecimento = dados["data"]
             if codigo in veiculos_dict:
                 veiculo = veiculos_dict[codigo]
-                veiculo.hodometro_atual = hodometro
+                ultimo_abastecimento = session_instance.query(Abastecimento).filter_by(veiculo_id=veiculo.id).order_by(Abastecimento.data_abastecimento.desc()).first()
+                data_ultimo_abastecimento = ultimo_abastecimento.data_abastecimento if ultimo_abastecimento else datetime.min
+                if data_abastecimento > data_ultimo_abastecimento:
+                    # Só atualizar se o novo hodômetro for maior que 0 e maior que o atual (ou se o atual for 0)
+                    if hodometro > 0 and (veiculo.hodometro_atual == 0 or hodometro > veiculo.hodometro_atual):
+                        veiculo.hodometro_atual = hodometro
+                    else:
+                        veiculos_nao_atualizados.append(codigo)
+                if veiculo.hodometro_atual == 0:
+                    veiculos_zerados.append(codigo)
+
+        # Verificar todos os veículos para identificar os que estão com hodômetro zerado
+        for veiculo in veiculos:
+            if veiculo.hodometro_atual == 0 and str(veiculo.codigo) not in veiculos_zerados:
+                veiculos_zerados.append(str(veiculo.codigo))
+                if str(veiculo.codigo) not in hodometros_veiculos:
+                    veiculos_nao_atualizados.append(str(veiculo.codigo))
 
         session_instance.commit()
         if write_progress:
             st.success("✅ Sincronização concluída com sucesso!")
+            if veiculos_zerados:
+                st.warning(f"⚠️ Os seguintes veículos estão com hodômetro zerado após a sincronização: {', '.join(veiculos_zerados)}")
+            if veiculos_nao_atualizados:
+                st.info(f"ℹ️ Os seguintes veículos não foram atualizados (hodômetro inválido ou não mais recente): {', '.join(veiculos_nao_atualizados)}")
 
     except requests.exceptions.RequestException as e:
         session_instance.rollback()
