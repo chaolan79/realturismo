@@ -166,75 +166,149 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
     try:
         api_url = "http://89.116.214.34:8000/api/abastecimentos/"
         headers = {"Authorization": "Token c6f5a268b3f1bc95c875a8203ad1562f47dcf0ad"}
-        params = {"EValidado": "", "veiculo": "", "month": "", "year": "2025", "page": 1, "perPage": 100}
+
+        # Calcular o intervalo dos últimos 30 dias
+        hoje = datetime.now()
+        data_inicio = hoje - timedelta(days=30)
+        
+        # Determinar os meses e anos envolvidos no intervalo
+        meses_anos = []
+        current_date = data_inicio
+        while current_date <= hoje:
+            meses_anos.append((current_date.month, current_date.year))
+            current_date += timedelta(days=1)
+        meses_anos = list(set(meses_anos))  # Remover duplicatas
 
         session_requests = requests.Session()
         retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
         session_requests.mount("http://", HTTPAdapter(max_retries=retries))
         TIMEOUT = 30
 
+        # Testar conexão com a API
         try:
-            test_response = session_requests.get(api_url, headers=headers, params=params, timeout=TIMEOUT)
+            test_response = session_requests.get(api_url, headers=headers, timeout=TIMEOUT)
             test_response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            raise
+            raise Exception(f"Erro ao conectar à API: {e}")
 
         hodometros_veiculos = {}
-        while True:
-            try:
-                response = session_requests.get(api_url, headers=headers, params=params, timeout=TIMEOUT)
-                response.raise_for_status()
-            except requests.exceptions.RequestException as e:
-                raise
-
-            dados_api = response.json()
-            resultados = dados_api.get("results", [])
-
-            for item in resultados:
-                codigo = str(item.get("veiculo"))
-                hodometro = float(item.get("hodometro", 0.0))
-                data_str = item.get("data")
-
-                try:
-                    data = datetime.fromisoformat(data_str.replace("Z", "+00:00"))
-                    data = data.replace(tzinfo=None)
-                except ValueError:
-                    continue
-
-                if codigo in hodometros_veiculos:
-                    if data > hodometros_veiculos[codigo]["data"]:
-                        hodometros_veiculos[codigo] = {"hodometro": hodometro, "data": data}
-                else:
-                    hodometros_veiculos[codigo] = {"hodometro": hodometro, "data": data}
-
-            next_url = dados_api.get("next")
-            if not next_url:
-                break
-            params["page"] += 1
-
         veiculos = session_instance.query(Veiculo).all()
         veiculos_dict = {str(v.codigo): v for v in veiculos}
 
-        for codigo, dados in hodometros_veiculos.items():
-            hodometro = dados["hodometro"]
-            if hodometro <= 0.0:
-                continue
-            if codigo in veiculos_dict:
-                veiculo = veiculos_dict[codigo]
-                ultimo_abastecimento = session_instance.query(Abastecimento).filter_by(veiculo_id=veiculo.id).order_by(Abastecimento.data.desc()).first()
-                data_ultimo_abastecimento = ultimo_abastecimento.data if ultimo_abastecimento else datetime.min
-                if hasattr(data_ultimo_abastecimento, 'tzinfo') and data_ultimo_abastecimento.tzinfo is not None:
-                    data_ultimo_abastecimento = data_ultimo_abastecimento.replace(tzinfo=None)
-                if dados["data"] > data_ultimo_abastecimento:
-                    veiculo.hodometro_atual = hodometro
+        # Verificar veículos com hodômetro zerado antes da sincronização
+        veiculos_zerados_antes = [str(v.codigo) for v in veiculos if v.hodometro_atual == 0]
+        if veiculos_zerados_antes and write_progress:
+            st.warning(f"⚠️ Antes da sincronização, os seguintes veículos estão com hodômetro zerado: {', '.join(veiculos_zerados_antes)}")
+
+        # Buscar dados para cada mês/ano no intervalo
+        for mes, ano in meses_anos:
+            params = {
+                "EValidado": "",
+                "veiculo": "",
+                "month": str(mes),
+                "year": str(ano),
+                "page": 1,
+                "perPage": 100
+            }
+
+            while True:
+                try:
+                    response = session_requests.get(api_url, headers=headers, params=params, timeout=TIMEOUT)
+                    response.raise_for_status()
+                except requests.exceptions.RequestException as e:
+                    raise Exception(f"Erro ao buscar dados da API para {mes}/{ano}: {e}")
+
+                dados_api = response.json()
+                resultados = dados_api.get("results", [])
+
+                for item in resultados:
+                    # Extrair dados do abastecimento
+                    codigo = str(item.get("veiculo_detail", {}).get("codigo"))
+                    hodometro = float(item.get("hodometro", 0.0))
+                    abastecimento_id = item.get("id")
+                    veiculo_id_api = item.get("veiculo")
+                    data_abastecimento_str = item.get("horario")
+                    litros = float(item.get("litros", 0.0))
+                    valor = float(item.get("valor", 0.0))
+
+                    # Converter a data do abastecimento
+                    try:
+                        data_abastecimento = datetime.strptime(data_abastecimento_str, "%d/%m/%Y %H:%M:%S")
+                    except (ValueError, TypeError):
+                        continue  # Ignorar registros com data inválida
+
+                    # Verificar se o abastecimento já existe no banco
+                    abastecimento_existente = session_instance.query(Abastecimento).filter_by(id=abastecimento_id).first()
+                    if not abastecimento_existente:
+                        # Encontrar o veículo correspondente no banco
+                        veiculo = veiculos_dict.get(codigo)
+                        if veiculo:
+                            # Criar novo registro de abastecimento
+                            novo_abastecimento = Abastecimento(
+                                id=abastecimento_id,
+                                veiculo_id=veiculo.id,
+                                data_abastecimento=data_abastecimento,
+                                hodometro=hodometro,
+                                litros=litros,
+                                valor=valor
+                            )
+                            session_instance.add(novo_abastecimento)
+                        else:
+                            continue  # Ignorar se o veículo não for encontrado
+
+                    # Atualizar o hodômetro do veículo (apenas se válido)
+                    if hodometro <= 0.0:
+                        continue
+                    if codigo in hodometros_veiculos:
+                        if data_abastecimento > hodometros_veiculos[codigo]["data"]:
+                            hodometros_veiculos[codigo] = {"hodometro": hodometro, "data": data_abastecimento}
+                    else:
+                        hodometros_veiculos[codigo] = {"hodometro": hodometro, "data": data_abastecimento}
+
+                next_url = dados_api.get("next")
+                if not next_url:
+                    break
+                params["page"] += 1
+
+        # Atualizar o hodometro_atual apenas dos veículos que têm registros válidos na API
+        veiculos_zerados = []
+        veiculos_nao_atualizados = []
+        for veiculo in veiculos:
+            codigo = str(veiculo.codigo)
+            if codigo in hodometros_veiculos:
+                dados = hodometros_veiculos[codigo]
+                hodometro = dados["hodometro"]
+                data_abastecimento = dados["data"]
+                ultimo_abastecimento = session_instance.query(Abastecimento).filter_by(veiculo_id=veiculo.id).order_by(Abastecimento.data_abastecimento.desc()).first()
+                data_ultimo_abastecimento = ultimo_abastecimento.data_abastecimento if ultimo_abastecimento else datetime.min
+                if data_abastecimento > data_ultimo_abastecimento:
+                    # Só atualizar se o novo hodômetro for maior que 0 e maior que o atual (ou se o atual for 0)
+                    if hodometro > 0 and (veiculo.hodometro_atual == 0 or hodometro > veiculo.hodometro_atual):
+                        veiculo.hodometro_atual = hodometro
+                    else:
+                        veiculos_nao_atualizados.append(codigo)
+                else:
+                    veiculos_nao_atualizados.append(codigo)
+            else:
+                veiculos_nao_atualizados.append(codigo)
+
+            if veiculo.hodometro_atual == 0:
+                veiculos_zerados.append(codigo)
 
         session_instance.commit()
+        if write_progress:
+            st.success("✅ Sincronização concluída com sucesso!")
+            if veiculos_zerados:
+                st.warning(f"⚠️ Os seguintes veículos estão com hodômetro zerado após a sincronização: {', '.join(veiculos_zerados)}")
+            if veiculos_nao_atualizados:
+                st.info(f"ℹ️ Os seguintes veículos não foram atualizados (hodômetro inválido, não mais recente ou sem registros): {', '.join(veiculos_nao_atualizados)}")
 
     except requests.exceptions.RequestException as e:
-        raise
+        session_instance.rollback()
+        raise Exception(f"Erro ao sincronizar dados: {e}")
     except Exception as e:
         session_instance.rollback()
-        raise
+        raise Exception(f"Erro inesperado ao sincronizar dados: {e}")
 
 def obter_dados_manutencoes(filtro_status=None, session_instance=None):
     if not session_instance:
@@ -349,8 +423,7 @@ if menu_principal == "Dashboard":
     if st.button("🔄 Sincronizar Dados de Veículos", key="sync_button", help="Clique para sincronizar os dados dos veículos e atualizar os hodômetros"):
         if session:
             try:
-                sincronizar_dados_veiculos(session, write_progress=False)
-                st.success("✅ Sincronização concluída com sucesso!")
+                sincronizar_dados_veiculos(session, write_progress=True)
             except Exception as e:
                 st.error(f"❌ Erro ao sincronizar dados: {e}")
         else:
