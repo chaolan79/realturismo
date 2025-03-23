@@ -164,7 +164,7 @@ def calcular_status(registro, veiculo, km_aviso=1000.0, data_limite_dias=30.0):
 
 def sincronizar_dados_veiculos(session_instance, write_progress=True):
     try:
-        api_url = "http://89.116.214.34:8000/api/hodometro/"
+        api_url = "http://89.116.214.34:8000/api/abastecimentos/"
         headers = {"Authorization": "Token c6f5a268b3f1bc95c875a8203ad1562f47dcf0ad"}
         params = {"EValidado": "", "veiculo": "", "month": "", "year": "2025", "page": 1, "perPage": 100}
 
@@ -194,7 +194,7 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
             resultados = dados_api.get("results", [])
 
             for item in resultados:
-                codigo = str(item.get("veiculo"))
+                codigo = str(item.get("veiculo_detail", {}).get("codigo"))
                 hodometro = float(item.get("hodometro", 0.0))
 
                 if codigo in hodometros_veiculos:
@@ -219,6 +219,8 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
                 veiculo = veiculos_dict[codigo]
                 st.info(f"Atualizando hodômetro do veículo {codigo}: {veiculo.hodometro_atual} -> {hodometro}")
                 veiculo.hodometro_atual = hodometro
+            else:
+                st.warning(f"Veículo com código {codigo} não encontrado no banco de dados.")
 
         session_instance.commit()
         if write_progress:
