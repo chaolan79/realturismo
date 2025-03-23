@@ -166,15 +166,27 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
     try:
         api_url = "http://89.116.214.34:8000/api/abastecimentos/"
         headers = {"Authorization": "Token c6f5a268b3f1bc95c875a8203ad1562f47dcf0ad"}
-        params = {"EValidado": "", "veiculo": "", "month": "", "year": "2025", "page": 1, "perPage": 100}
+
+        # Calcular o intervalo dos últimos 30 dias
+        hoje = datetime.now()
+        data_inicio = hoje - timedelta(days=30)
+        
+        # Determinar os meses e anos envolvidos no intervalo
+        meses_anos = []
+        current_date = data_inicio
+        while current_date <= hoje:
+            meses_anos.append((current_date.month, current_date.year))
+            current_date += timedelta(days=1)
+        meses_anos = list(set(meses_anos))  # Remover duplicatas
 
         session_requests = requests.Session()
         retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
         session_requests.mount("http://", HTTPAdapter(max_retries=retries))
         TIMEOUT = 30
 
+        # Testar conexão com a API
         try:
-            test_response = session_requests.get(api_url, headers=headers, params=params, timeout=TIMEOUT)
+            test_response = session_requests.get(api_url, headers=headers, timeout=TIMEOUT)
             test_response.raise_for_status()
         except requests.exceptions.RequestException as e:
             raise Exception(f"Erro ao conectar à API: {e}")
@@ -183,48 +195,77 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
         veiculos = session_instance.query(Veiculo).all()
         veiculos_dict = {str(v.codigo): v for v in veiculos}
 
-        # Log: Listar veículos no banco de dados
-        st.write("### Veículos no Banco de Dados")
-        for v in veiculos:
-            st.write(f"Código: {v.codigo}, Placa: {v.placa}, Hodômetro Atual: {v.hodometro_atual}")
+        # Buscar dados para cada mês/ano no intervalo
+        for mes, ano in meses_anos:
+            params = {
+                "EValidado": "",
+                "veiculo": "",
+                "month": str(mes),
+                "year": str(ano),
+                "page": 1,
+                "perPage": 100
+            }
 
-        total_registros = 0
-        while True:
-            try:
-                response = session_requests.get(api_url, headers=headers, params=params, timeout=TIMEOUT)
-                response.raise_for_status()
-            except requests.exceptions.RequestException as e:
-                raise Exception(f"Erro ao buscar dados da API: {e}")
+            while True:
+                try:
+                    response = session_requests.get(api_url, headers=headers, params=params, timeout=TIMEOUT)
+                    response.raise_for_status()
+                except requests.exceptions.RequestException as e:
+                    raise Exception(f"Erro ao buscar dados da API para {mes}/{ano}: {e}")
 
-            dados_api = response.json()
-            resultados = dados_api.get("results", [])
-            total_registros += len(resultados)
-            st.write(f"Processados {total_registros} registros até a página {params['page']}")
+                dados_api = response.json()
+                resultados = dados_api.get("results", [])
 
-            for item in resultados:
-                codigo = str(item.get("veiculo_detail", {}).get("codigo"))
-                hodometro = float(item.get("hodometro", 0.0))
+                for item in resultados:
+                    # Extrair dados do abastecimento
+                    codigo = str(item.get("veiculo_detail", {}).get("codigo"))
+                    hodometro = float(item.get("hodometro", 0.0))
+                    abastecimento_id = item.get("id")
+                    veiculo_id_api = item.get("veiculo")
+                    data_abastecimento_str = item.get("horario")
+                    litros = float(item.get("litros", 0.0))
+                    valor = float(item.get("valor", 0.0))
 
-                # Log: Exibir registros dos veículos 166, 121, 120, 115
-                if codigo in ["166", "121", "120", "115"]:
-                    st.write(f"Veículo {codigo}: Hodômetro = {hodometro}")
+                    # Converter a data do abastecimento
+                    try:
+                        data_abastecimento = datetime.strptime(data_abastecimento_str, "%d/%m/%Y %H:%M:%S")
+                    except (ValueError, TypeError):
+                        continue  # Ignorar registros com data inválida
 
-                if codigo in hodometros_veiculos:
-                    if hodometro > hodometros_veiculos[codigo]["hodometro"]:
+                    # Verificar se o abastecimento já existe no banco
+                    abastecimento_existente = session_instance.query(Abastecimento).filter_by(id=abastecimento_id).first()
+                    if not abastecimento_existente:
+                        # Encontrar o veículo correspondente no banco
+                        veiculo = next((v for v in veiculos if str(v.codigo) == codigo), None)
+                        if veiculo:
+                            # Criar novo registro de abastecimento
+                            novo_abastecimento = Abastecimento(
+                                id=abastecimento_id,
+                                veiculo_id=veiculo.id,
+                                data_abastecimento=data_abastecimento,
+                                hodometro=hodometro,
+                                litros=litros,
+                                valor=valor
+                            )
+                            session_instance.add(novo_abastecimento)
+
+                    # Atualizar o hodômetro do veículo
+                    if hodometro <= 0.0:  # Ignorar valores inválidos (apenas menores ou iguais a 0)
+                        continue
+                    if codigo in hodometros_veiculos:
+                        if hodometro > hodometros_veiculos[codigo]["hodometro"]:
+                            hodometros_veiculos[codigo] = {"hodometro": hodometro}
+                    else:
                         hodometros_veiculos[codigo] = {"hodometro": hodometro}
-                else:
-                    hodometros_veiculos[codigo] = {"hodometro": hodometro}
 
-            next_url = dados_api.get("next")
-            if not next_url:
-                break
-            params["page"] += 1
+                next_url = dados_api.get("next")
+                if not next_url:
+                    break
+                params["page"] += 1
 
         # Atualizar o hodometro_atual dos veículos
         for codigo, dados in hodometros_veiculos.items():
             hodometro = dados["hodometro"]
-            if hodometro <= 0.0:  # Ignorar valores inválidos (apenas menores ou iguais a 0)
-                continue
             if codigo in veiculos_dict:
                 veiculo = veiculos_dict[codigo]
                 veiculo.hodometro_atual = hodometro
@@ -444,42 +485,95 @@ if menu_principal == "Dashboard":
         col5, col6 = st.columns(2)
         try:
             df_manutencao = pd.read_sql(
-                session.query(Manutencao).statement, session.bind
+                session.query(Manutencao.categoria, func.count().label('total'))
+                .group_by(Manutencao.categoria)
+                .statement,
+                session.bind
             )
             if not df_manutencao.empty:
-                df_manutencao['data_manutencao'] = pd.to_datetime(df_manutencao['data_manutencao'])
-                df_manutencao['mes_ano'] = df_manutencao['data_manutencao'].dt.to_period('M').astype(str)
-                df_custo_mensal = df_manutencao.groupby('mes_ano')['valor_manutencao'].sum().reset_index()
-                fig_custo = px.line(df_custo_mensal, x='mes_ano', y='valor_manutencao', title="📉 Custo Mensal de Manutenções", labels={'mes_ano': 'Mês/Ano', 'valor_manutencao': 'Custo (R$)'})
-                fig_custo.update_layout(height=400)
-                with col5:
-                    st.plotly_chart(fig_custo, use_container_width=True)
+                fig_categoria = px.pie(df_manutencao, names="categoria", values="total", title="🛠 Manutenções por Categoria", hole=0.3)
+                fig_categoria.update_layout(height=400)
+                with col5: st.plotly_chart(fig_categoria, use_container_width=True)
             else:
-                with col5:
-                    st.warning("⚠️ Nenhum dado disponível para Custo Mensal.")
+                with col5: st.warning("⚠️ Nenhum dado disponível para Manutenções por Categoria.")
         except Exception as e:
-            with col5:
-                st.error(f"Erro ao carregar gráfico de custo: {e}")
+            with col5: st.error(f"Erro ao carregar gráfico: {e}")
 
         try:
-            df_manutencao['tipo'] = df_manutencao['tipo'].fillna('Desconhecido')
-            df_tipo = df_manutencao.groupby('tipo').size().reset_index(name='quantidade')
-            fig_tipo = px.bar(df_tipo, x='tipo', y='quantidade', title="📊 Manutenções por Tipo", labels={'tipo': 'Tipo', 'quantidade': 'Quantidade'})
-            fig_tipo.update_layout(height=400)
-            with col6:
-                st.plotly_chart(fig_tipo, use_container_width=True)
+            df_tipo = pd.read_sql(
+                session.query(Manutencao.tipo, func.count().label('total'))
+                .group_by(Manutencao.tipo)
+                .statement,
+                session.bind
+            )
+            if not df_tipo.empty:
+                fig_tipo = px.pie(df_tipo, names="tipo", values="total", title="🔧 Tipo de Manutenção", hole=0.3)
+                fig_tipo.update_layout(height=400)
+                with col6: st.plotly_chart(fig_tipo, use_container_width=True)
+            else:
+                with col6: st.warning("⚠️ Nenhum dado disponível para Tipo de Manutenção.")
         except Exception as e:
-            with col6:
-                st.error(f"Erro ao carregar gráfico de tipo: {e}")
+            with col6: st.error(f"Erro ao carregar gráfico: {e}")
+
+        st.markdown("### 📆 **Gastos nos Últimos 15 Dias**")
+        try:
+            if session:
+                data_limite = datetime.today() - timedelta(days=15)
+                df_gastos = pd.read_sql(
+                    session.query(
+                        func.date(Manutencao.data_manutencao).label('data'),
+                        func.sum(Manutencao.valor_manutencao).label('total')
+                    )
+                    .filter(Manutencao.data_manutencao >= data_limite)
+                    .group_by(func.date(Manutencao.data_manutencao))
+                    .order_by(func.date(Manutencao.data_manutencao))
+                    .statement,
+                    session.bind
+                )
+                if not df_gastos.empty:
+                    df_gastos["data"] = pd.to_datetime(df_gastos["data"])
+                    fig_gastos = px.line(df_gastos, x="data", y="total", title="📉 Gastos com Manutenção nos Últimos 15 Dias", markers=True)
+                    fig_gastos.update_layout(height=300)
+                    st.plotly_chart(fig_gastos, use_container_width=True)
+                else:
+                    st.warning("⚠️ Nenhum gasto registrado nos últimos 15 dias.")
+        except Exception as e:
+            st.error(f"Erro ao carregar gráfico: {e}")
+
+        st.markdown("### 📊 **Manutenções por Mês**")
+        try:
+            df_manutencoes = obter_dados_manutencoes(session_instance=session)
+            if not df_manutencoes.empty:
+                df_manutencoes['Mês'] = pd.to_datetime(df_manutencoes['Data Manutenção']).dt.strftime('%Y-%m')
+                fig_barras = px.bar(df_manutencoes, x='Mês', title='📊 Manutenções por Mês', color='Status', barmode='group', color_discrete_sequence=['#4CAF50', '#FFC107', '#FF5722', '#9E9E9E'])
+                fig_barras.update_layout(height=400)
+                st.plotly_chart(fig_barras, use_container_width=True)
+            else:
+                st.warning("⚠️ Nenhum dado disponível para Manutenções por Mês.")
+        except Exception as e:
+            st.error(f"Erro ao carregar gráfico de barras: {e}")
+
+        st.markdown("### 📈 **Valor Total por Mês**")
+        try:
+            df_manutencoes = obter_dados_manutencoes(session_instance=session)
+            if not df_manutencoes.empty:
+                df_manutencoes['Mês'] = pd.to_datetime(df_manutencoes['Data Manutenção']).dt.strftime('%Y-%m')
+                fig_linhas = px.line(df_manutencoes.groupby('Mês')['Valor (R$)'].sum().reset_index(), x='Mês', y='Valor (R$)', title='📈 Valor Total por Mês')
+                fig_linhas.update_layout(height=400)
+                st.plotly_chart(fig_linhas, use_container_width=True)
+            else:
+                st.warning("⚠️ Nenhum dado disponível para Valor Total por Mês.")
+        except Exception as e:
+            st.error(f"Erro ao carregar gráfico de linhas: {e}")
 
 elif menu_principal == "Cadastros":
-    cadastros.app(session)
+    cadastros.exibir_cadastros()
 
 elif menu_principal == "Manutenções":
-    manutencoes.app(session)
+    manutencoes.exibir_manutencoes()
 
 elif menu_principal == "Relatórios":
-    relatorios.app(session)
+    relatorios.exibir_relatorios()
 
 elif menu_principal == "Configurações":
-    configuracoes.app(session)
+    configuracoes.exibir_configuracoes(session=session, sincronizar_dados_veiculos=sincronizar_dados_veiculos)
