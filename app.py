@@ -263,7 +263,8 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
                     break
                 params["page"] += 1
 
-        # Atualizar o hodometro_atual dos veículos
+        # Atualizar o hodometro_atual apenas dos veículos que têm registros na API
+        # Veículos sem registros nos últimos 30 dias manterão seu hodometro_atual atual
         for codigo, dados in hodometros_veiculos.items():
             hodometro = dados["hodometro"]
             if codigo in veiculos_dict:
