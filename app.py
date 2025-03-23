@@ -18,6 +18,12 @@ from datetime import datetime, timedelta, date
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+import io
 
 # Inicializar a sessão com try-except
 try:
@@ -25,6 +31,65 @@ try:
 except Exception as e:
     st.error(f"Erro ao conectar ao banco de dados: {e}")
     session = None
+
+# Configurações do Google Drive
+SCOPES = ['https://www.googleapis.com/auth/drive.file']
+FILE_ID = '1YXMZJdto7Lmpv9aEGazd_3X_bzB8K2C4'  # ID do arquivo manutencoes.db
+DB_FILE = 'manutencoes.db'
+
+# Criar client_secrets.json a partir dos secrets do Streamlit
+if 'CLIENT_SECRETS' in st.secrets:
+    with open('client_secrets.json', 'w') as f:
+        f.write(st.secrets['CLIENT_SECRETS']['content'])
+else:
+    # Para execução local, certifique-se de que client_secrets.json está no diretório
+    if not os.path.exists('client_secrets.json'):
+        st.error("Arquivo client_secrets.json não encontrado. Adicione-o ao diretório raiz ou configure os secrets no Streamlit Cloud.")
+        st.stop()
+
+# Criar token.json a partir dos secrets do Streamlit
+if 'TOKEN' in st.secrets:
+    with open('token.json', 'w') as f:
+        f.write(st.secrets['TOKEN']['content'])
+
+# Função para autenticar e obter o serviço do Google Drive
+def get_drive_service():
+    creds = None
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file('client_secrets.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+            with open('token.json', 'w') as token:
+                token.write(creds.to_json())
+    return build('drive', 'v3', credentials=creds)
+
+# Função para baixar o arquivo do Google Drive
+def download_file():
+    service = get_drive_service()
+    request = service.files().get_media(fileId=FILE_ID)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while done is False:
+        status, done = downloader.next_chunk()
+    with open(DB_FILE, 'wb') as f:
+        f.write(fh.getvalue())
+
+# Função para enviar o arquivo atualizado ao Google Drive
+def upload_file():
+    service = get_drive_service()
+    media = MediaFileUpload(DB_FILE)
+    service.files().update(fileId=FILE_ID, media_body=media).execute()
+
+# Baixar o arquivo do Google Drive se ele não existir localmente
+if not os.path.exists(DB_FILE):
+    st.write("Baixando o banco de dados do Google Drive...")
+    download_file()
+    st.write("Banco de dados baixado com sucesso!")
 
 st.set_page_config(page_title="Gestão de Manutenção", layout="wide")
 
@@ -606,3 +671,12 @@ elif menu_principal == "Relatórios":
 
 elif menu_principal == "Configurações":
     configuracoes.exibir_configuracoes(session=session, sincronizar_dados_veiculos=sincronizar_dados_veiculos)
+
+# Botão para enviar o banco de dados atualizado ao Google Drive
+if st.button("📤 Enviar Banco de Dados para o Google Drive"):
+    upload_file()
+    st.success("Banco de dados enviado ao Google Drive com sucesso!")
+
+# Fechar a sessão do banco de dados
+if session:
+    session.close()
