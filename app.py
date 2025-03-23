@@ -241,7 +241,7 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
                     abastecimento_existente = session_instance.query(Abastecimento).filter_by(id=abastecimento_id).first()
                     if not abastecimento_existente:
                         # Encontrar o veículo correspondente no banco
-                        veiculo = next((v for v in veiculos if str(v.codigo) == codigo), None)
+                        veiculo = veiculos_dict.get(codigo)
                         if veiculo:
                             # Criar novo registro de abastecimento
                             novo_abastecimento = Abastecimento(
@@ -253,9 +253,11 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
                                 valor=valor
                             )
                             session_instance.add(novo_abastecimento)
+                        else:
+                            continue  # Ignorar se o veículo não for encontrado
 
-                    # Atualizar o hodômetro do veículo
-                    if hodometro <= 0.0:  # Ignorar valores inválidos (apenas menores ou iguais a 0)
+                    # Atualizar o hodômetro do veículo (apenas se válido)
+                    if hodometro <= 0.0:
                         continue
                     if codigo in hodometros_veiculos:
                         if data_abastecimento > hodometros_veiculos[codigo]["data"]:
@@ -268,14 +270,15 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
                     break
                 params["page"] += 1
 
-        # Atualizar o hodometro_atual apenas dos veículos que têm registros na API
+        # Atualizar o hodometro_atual apenas dos veículos que têm registros válidos na API
         veiculos_zerados = []
         veiculos_nao_atualizados = []
-        for codigo, dados in hodometros_veiculos.items():
-            hodometro = dados["hodometro"]
-            data_abastecimento = dados["data"]
-            if codigo in veiculos_dict:
-                veiculo = veiculos_dict[codigo]
+        for veiculo in veiculos:
+            codigo = str(veiculo.codigo)
+            if codigo in hodometros_veiculos:
+                dados = hodometros_veiculos[codigo]
+                hodometro = dados["hodometro"]
+                data_abastecimento = dados["data"]
                 ultimo_abastecimento = session_instance.query(Abastecimento).filter_by(veiculo_id=veiculo.id).order_by(Abastecimento.data_abastecimento.desc()).first()
                 data_ultimo_abastecimento = ultimo_abastecimento.data_abastecimento if ultimo_abastecimento else datetime.min
                 if data_abastecimento > data_ultimo_abastecimento:
@@ -284,15 +287,13 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
                         veiculo.hodometro_atual = hodometro
                     else:
                         veiculos_nao_atualizados.append(codigo)
-                if veiculo.hodometro_atual == 0:
-                    veiculos_zerados.append(codigo)
+                else:
+                    veiculos_nao_atualizados.append(codigo)
+            else:
+                veiculos_nao_atualizados.append(codigo)
 
-        # Verificar todos os veículos para identificar os que estão com hodômetro zerado
-        for veiculo in veiculos:
-            if veiculo.hodometro_atual == 0 and str(veiculo.codigo) not in veiculos_zerados:
-                veiculos_zerados.append(str(veiculo.codigo))
-                if str(veiculo.codigo) not in hodometros_veiculos:
-                    veiculos_nao_atualizados.append(str(veiculo.codigo))
+            if veiculo.hodometro_atual == 0:
+                veiculos_zerados.append(codigo)
 
         session_instance.commit()
         if write_progress:
@@ -300,7 +301,7 @@ def sincronizar_dados_veiculos(session_instance, write_progress=True):
             if veiculos_zerados:
                 st.warning(f"⚠️ Os seguintes veículos estão com hodômetro zerado após a sincronização: {', '.join(veiculos_zerados)}")
             if veiculos_nao_atualizados:
-                st.info(f"ℹ️ Os seguintes veículos não foram atualizados (hodômetro inválido ou não mais recente): {', '.join(veiculos_nao_atualizados)}")
+                st.info(f"ℹ️ Os seguintes veículos não foram atualizados (hodômetro inválido, não mais recente ou sem registros): {', '.join(veiculos_nao_atualizados)}")
 
     except requests.exceptions.RequestException as e:
         session_instance.rollback()
