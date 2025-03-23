@@ -214,6 +214,12 @@ def configurar_sincronizacao_veiculos(session, sincronizar_dados_veiculos):
                     logs.append(mensagem)
                     log_area.write("\n".join(logs))
 
+                # Verificar veículos com hodômetro zerado antes da sincronização
+                veiculos = session.query(Veiculo).all()
+                veiculos_zerados_antes = [str(v.codigo) for v in veiculos if v.hodometro_atual == 0]
+                if veiculos_zerados_antes:
+                    adicionar_log(f"⚠️ Antes da sincronização, os seguintes veículos estão com hodômetro zerado: {', '.join(veiculos_zerados_antes)}")
+
                 # Etapa 1: Testar conexão com a API
                 adicionar_log("⏳ Etapa 1/5: Testando conexão com a API...")
                 try:
@@ -232,6 +238,7 @@ def configurar_sincronizacao_veiculos(session, sincronizar_dados_veiculos):
                 abastecimentos_adicionados = 0
                 veiculos_atualizados = 0
                 veiculos_nao_encontrados = 0
+                veiculos_nao_atualizados = []
 
                 # Etapa 2: Buscar dados da API
                 adicionar_log("⏳ Etapa 2/5: Buscando dados da API...")
@@ -357,6 +364,7 @@ def configurar_sincronizacao_veiculos(session, sincronizar_dados_veiculos):
 
                 # Etapa 5: Atualizar hodômetros dos veículos
                 adicionar_log("⏳ Etapa 5/5: Atualizando hodômetros dos veículos...")
+                veiculos_zerados = []
                 for codigo, dados in hodometros_veiculos.items():
                     hodometro = dados["hodometro"]
                     data_abastecimento = dados["data"]
@@ -365,20 +373,40 @@ def configurar_sincronizacao_veiculos(session, sincronizar_dados_veiculos):
                         ultimo_abastecimento = session.query(Abastecimento).filter_by(veiculo_id=veiculo.id).order_by(Abastecimento.data_abastecimento.desc()).first()
                         data_ultimo_abastecimento = ultimo_abastecimento.data_abastecimento if ultimo_abastecimento else datetime.min
                         if data_abastecimento > data_ultimo_abastecimento:
-                            veiculo.hodometro_atual = hodometro
-                            veiculos_atualizados += 1
-                            adicionar_log(f"🚗 Veículo {codigo} atualizado: hodômetro {hodometro} km (data mais recente: {data_abastecimento}).")
+                            # Só atualizar se o novo hodômetro for maior que 0 e maior que o atual (ou se o atual for 0)
+                            if hodometro > 0 and (veiculo.hodometro_atual == 0 or hodometro > veiculo.hodometro_atual):
+                                veiculo.hodometro_atual = hodometro
+                                veiculos_atualizados += 1
+                                adicionar_log(f"🚗 Veículo {codigo} atualizado: hodômetro {hodometro} km (data mais recente: {data_abastecimento}).")
+                            else:
+                                veiculos_nao_atualizados.append(codigo)
+                                adicionar_log(f"ℹ️ Veículo {codigo} não atualizado: novo hodômetro ({hodometro}) não é maior que o atual ({veiculo.hodometro_atual}).")
                         else:
+                            veiculos_nao_atualizados.append(codigo)
                             adicionar_log(f"ℹ️ Veículo {codigo} não atualizado: data da API ({data_abastecimento}) não é mais recente que o último abastecimento ({data_ultimo_abastecimento}).")
+                        if veiculo.hodometro_atual == 0:
+                            veiculos_zerados.append(codigo)
                     else:
                         veiculos_nao_encontrados += 1
                         adicionar_log(f"⚠️ Veículo com código {codigo} não encontrado no banco.")
+
+                # Verificar todos os veículos para identificar os que estão com hodômetro zerado
+                for veiculo in veiculos:
+                    if veiculo.hodometro_atual == 0 and str(veiculo.codigo) not in veiculos_zerados:
+                        veiculos_zerados.append(str(veiculo.codigo))
+                        if str(veiculo.codigo) not in hodometros_veiculos:
+                            veiculos_nao_atualizados.append(str(veiculo.codigo))
+                            adicionar_log(f"ℹ️ Veículo {veiculo.codigo} não atualizado: sem registros na API.")
 
                 # Salvar alterações no banco
                 session.commit()
                 data_atual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 atualizar_estado_integracao(novo_ultimo_id_processado, data_atual)
                 adicionar_log(f"✅ Sincronização concluída com sucesso!")
+                if veiculos_zerados:
+                    adicionar_log(f"⚠️ Os seguintes veículos estão com hodômetro zerado após a sincronização: {', '.join(veiculos_zerados)}")
+                if veiculos_nao_atualizados:
+                    adicionar_log(f"ℹ️ Os seguintes veículos não foram atualizados (hodômetro inválido, não mais recente ou sem registros): {', '.join(veiculos_nao_atualizados)}")
 
             # Exibir resumo fora do expander
             st.success(f"✅ Sincronização concluída!")
@@ -391,6 +419,10 @@ def configurar_sincronizacao_veiculos(session, sincronizar_dados_veiculos):
             st.write(f"**Veículos Não Encontrados**: {veiculos_nao_encontrados}")
             st.write(f"**Último ID Processado**: {novo_ultimo_id_processado}")
             st.write(f"**Data da Sincronização**: {data_atual}")
+            if veiculos_zerados:
+                st.warning(f"⚠️ Os seguintes veículos estão com hodômetro zerado após a sincronização: {', '.join(veiculos_zerados)}")
+            if veiculos_nao_atualizados:
+                st.info(f"ℹ️ Os seguintes veículos não foram atualizados (hodômetro inválido, não mais recente ou sem registros): {', '.join(veiculos_nao_atualizados)}")
 
         except Exception as e:
             session.rollback()
