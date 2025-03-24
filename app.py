@@ -69,7 +69,8 @@ def get_drive_service():
                 st.stop()
         else:
             # No ambiente do Streamlit Community Cloud, não podemos usar run_local_server
-            if 'STREAMLIT_CLOUD' in os.environ or 'ON_STREAMLIT_CLOUD' in os.environ:
+            # Verificamos se estamos no Streamlit Cloud usando uma variável de ambiente
+            if 'STREAMLIT_SERVER_PORT' in os.environ:
                 st.error("As credenciais do Google Drive estão inválidas ou ausentes. Por favor, gere um novo token.json localmente e atualize o secret TOKEN no Streamlit Community Cloud.")
                 st.stop()
             else:
