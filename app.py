@@ -59,12 +59,25 @@ def get_drive_service():
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+                # Salvar as credenciais atualizadas no token.json
+                with open('token.json', 'w') as token:
+                    token.write(creds.to_json())
+            except Exception as e:
+                st.error(f"Erro ao renovar as credenciais: {e}")
+                st.stop()
         else:
-            flow = InstalledAppFlow.from_client_secrets_file('client_secrets.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-            with open('token.json', 'w') as token:
-                token.write(creds.to_json())
+            # No ambiente do Streamlit Community Cloud, não podemos usar run_local_server
+            if 'STREAMLIT_CLOUD' in os.environ or 'ON_STREAMLIT_CLOUD' in os.environ:
+                st.error("As credenciais do Google Drive estão inválidas ou ausentes. Por favor, gere um novo token.json localmente e atualize o secret TOKEN no Streamlit Community Cloud.")
+                st.stop()
+            else:
+                # Para execução local, podemos usar run_local_server
+                flow = InstalledAppFlow.from_client_secrets_file('client_secrets.json', SCOPES)
+                creds = flow.run_local_server(port=0)
+                with open('token.json', 'w') as token:
+                    token.write(creds.to_json())
     return build('drive', 'v3', credentials=creds)
 
 # Função para baixar o arquivo do Google Drive
